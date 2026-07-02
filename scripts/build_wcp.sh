@@ -15,6 +15,9 @@ Environment variables:
   WINE_VERSION         wine_version in wcp.json (default: "proton-<version>")
   PROTON_BRANCH        Optional Steam beta branch name
   PROTON_APP_ID        Steam app ID (default: 1493710)
+  PROTON_SOURCE_URL    Optional tarball URL for a prebuilt Proton/GE release
+  PROTON_SOURCE_ARCHIVE Optional local tarball path for a prebuilt Proton/GE release
+  PROTON_SOURCE_DIR    Optional local extracted Proton/GE directory
   WCP_DESCRIPTION      Description in wcp.json
   PROFILE_VERSION_NAME Version name in profile.json (default: PROTON_VERSION-x86_64)
   PROFILE_VERSION_CODE Version code in profile.json (default: 0)
@@ -55,12 +58,19 @@ STEAMCMD_BIN="${STEAMCMD_BIN:-steamcmd}"
 FILES_SEARCH_MAX_DEPTH="${FILES_SEARCH_MAX_DEPTH:-4}"
 METADATA_PATH="${METADATA_PATH:-$WORK_DIR/metadata.json}"
 
-: "${STEAM_USERNAME:?STEAM_USERNAME is required}"
-: "${STEAM_PASSWORD:?STEAM_PASSWORD is required}"
+source_mode="steam"
+if [[ -n "${PROTON_SOURCE_DIR:-}" || -n "${PROTON_SOURCE_ARCHIVE:-}" || -n "${PROTON_SOURCE_URL:-}" ]]; then
+  source_mode="archive"
+fi
 
-if ! command -v "$STEAMCMD_BIN" >/dev/null 2>&1; then
-  echo "steamcmd not found: $STEAMCMD_BIN" >&2
-  exit 1
+if [[ "$source_mode" == "steam" ]]; then
+  : "${STEAM_USERNAME:?STEAM_USERNAME is required}"
+  : "${STEAM_PASSWORD:?STEAM_PASSWORD is required}"
+
+  if ! command -v "$STEAMCMD_BIN" >/dev/null 2>&1; then
+    echo "steamcmd not found: $STEAMCMD_BIN" >&2
+    exit 1
+  fi
 fi
 
 if ! command -v xz >/dev/null 2>&1; then
@@ -78,29 +88,100 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
+extract_source_archive() {
+  local archive_path="$1"
+  local extract_dir="$2"
+
+  python3 - "$archive_path" "$extract_dir" <<'PY'
+import os
+import pathlib
+import sys
+import tarfile
+
+archive = pathlib.Path(sys.argv[1])
+dest = pathlib.Path(sys.argv[2])
+
+if not archive.exists():
+    raise SystemExit(f"Source archive not found: {archive}")
+
+dest.mkdir(parents=True, exist_ok=True)
+
+
+def is_within_directory(directory: pathlib.Path, target: pathlib.Path) -> bool:
+    directory = directory.resolve()
+    target = target.resolve()
+    try:
+        return str(target).startswith(str(directory) + os.sep) or target == directory
+    except FileNotFoundError:
+        return False
+
+
+with tarfile.open(archive, 'r:*') as tar:
+    for member in tar.getmembers():
+        member_path = dest / member.name
+        if not is_within_directory(dest, member_path):
+            raise SystemExit(f"Refusing to extract unsafe path: {member.name}")
+    tar.extractall(dest)
+PY
+}
+
 download_dir="$WORK_DIR/proton"
 stage_dir="$WORK_DIR/stage"
 
 rm -rf "$download_dir" "$stage_dir"
 mkdir -p "$download_dir" "$stage_dir" "$OUTPUT_DIR"
 
-login_args=("$STEAM_USERNAME" "$STEAM_PASSWORD")
-if [[ -n "${STEAM_GUARD_CODE:-}" ]]; then
-  login_args+=("$STEAM_GUARD_CODE")
+if [[ "$source_mode" == "steam" ]]; then
+  login_args=("$STEAM_USERNAME" "$STEAM_PASSWORD")
+  if [[ -n "${STEAM_GUARD_CODE:-}" ]]; then
+    login_args+=("$STEAM_GUARD_CODE")
+  fi
+
+  app_update_args=(+app_update "$PROTON_APP_ID")
+  if [[ -n "$PROTON_BRANCH" ]]; then
+    app_update_args+=("-beta" "$PROTON_BRANCH")
+  fi
+  app_update_args+=("validate")
 fi
 
-app_update_args=(+app_update "$PROTON_APP_ID")
-if [[ -n "$PROTON_BRANCH" ]]; then
-  app_update_args+=("-beta" "$PROTON_BRANCH")
-fi
-app_update_args+=("validate")
+if [[ "$source_mode" == "steam" ]]; then
+  "$STEAMCMD_BIN" \
+    +@sSteamCmdForcePlatformType linux \
+    +login "${login_args[@]}" \
+    +force_install_dir "$download_dir" \
+    "${app_update_args[@]}" \
+    +quit
+else
+  if [[ -n "${PROTON_SOURCE_DIR:-}" ]]; then
+    if [[ ! -d "$PROTON_SOURCE_DIR" ]]; then
+      echo "PROTON_SOURCE_DIR does not exist: $PROTON_SOURCE_DIR" >&2
+      exit 1
+    fi
+    cp -a "$PROTON_SOURCE_DIR/." "$download_dir/"
+  else
+    archive_path="${PROTON_SOURCE_ARCHIVE:-}"
+    if [[ -z "$archive_path" ]]; then
+      archive_name="$(basename "${PROTON_SOURCE_URL%%\?*}")"
+      archive_path="$WORK_DIR/$archive_name"
+      python3 - "$PROTON_SOURCE_URL" "$archive_path" <<'PY'
+import pathlib
+import sys
+import urllib.request
 
-"$STEAMCMD_BIN" \
-  +@sSteamCmdForcePlatformType linux \
-  +login "${login_args[@]}" \
-  +force_install_dir "$download_dir" \
-  "${app_update_args[@]}" \
-  +quit
+url = sys.argv[1]
+path = pathlib.Path(sys.argv[2])
+path.parent.mkdir(parents=True, exist_ok=True)
+with urllib.request.urlopen(url) as response, path.open('wb') as f:
+    while True:
+        chunk = response.read(1024 * 1024)
+        if not chunk:
+            break
+        f.write(chunk)
+PY
+    fi
+    extract_source_archive "$archive_path" "$download_dir"
+  fi
+fi
 
 version_input="$PROTON_VERSION_INPUT"
 # Empty or "latest" triggers automatic build ID detection.
@@ -203,16 +284,16 @@ fi
 
 mkdir -p "$stage_dir/bin" "$stage_dir/lib" "$stage_dir/share"
 if [[ -d "$files_dir/bin" ]]; then
-  cp -a "$files_dir/bin/." "$stage_dir/bin/"
+  cp -al --remove-destination "$files_dir/bin/." "$stage_dir/bin/"
 fi
 if [[ -d "$files_dir/lib" ]]; then
-  cp -a "$files_dir/lib/." "$stage_dir/lib/"
+  cp -al --remove-destination "$files_dir/lib/." "$stage_dir/lib/"
 fi
 if [[ -d "$files_dir/lib64" ]]; then
-  cp -a "$files_dir/lib64/." "$stage_dir/lib/"
+  cp -al --remove-destination "$files_dir/lib64/." "$stage_dir/lib/"
 fi
 if [[ -d "$files_dir/share" ]]; then
-  cp -a "$files_dir/share/." "$stage_dir/share/"
+  cp -al --remove-destination "$files_dir/share/." "$stage_dir/share/"
 fi
 
 prefix_source="$files_dir/share/default_pfx"
@@ -279,6 +360,8 @@ data = {
 path = Path(os.environ["PROFILE_JSON_PATH"])
 path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 PY
+
+rm -rf "$download_dir"
 
 wcp_path="$OUTPUT_DIR/$WCP_FILENAME"
 rm -f "$wcp_path"

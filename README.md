@@ -1,24 +1,33 @@
 # proton-to-winlator-builder
 
-Automates converting Valve Proton releases into Winlator `.wcp` packages.
+Automates converting Valve Proton releases and compatible Proton-GE tarballs into Winlator `.wcp` packages.
 
 ## Local usage
 
 ```bash
+# Steam Proton build (requires Steam credentials)
 export STEAM_USERNAME=your_user
 export STEAM_PASSWORD=your_pass
 ./scripts/build_wcp.sh
+
+# Proton-GE / prebuilt tarball build
+export PROTON_VERSION=8-26
+export PROTON_NAME='GE-Proton 8-26'
+export WINE_VERSION='proton-8-26'
+export PROTON_SOURCE_URL='https://github.com/GloriousEggroll/proton-ge-custom/releases/download/GE-Proton8-26/GE-Proton8-26.tar.gz'
+./scripts/build_wcp.sh
 ```
 
-The script downloads Proton via SteamCMD, restructures the `files/` tree into the
-Winlator layout, generates `wcp.json`, `profile.json`, and `prefixPack.txz`, and
-writes the `.wcp` archive to `./dist`.
+The script downloads Proton via SteamCMD, or it can unpack a Proton/GE tarball,
+restructures the `files/` tree into the Winlator layout, generates `wcp.json`,
+`profile.json`, and `prefixPack.txz`, and writes the `.wcp` archive to `./dist`.
 
 If `PROTON_VERSION` is omitted or set to `latest`, the script uses the most
 recent Steam build ID as the version. Set `PROTON_VERSION` to a specific release
 when needed.
 
-Local runs expect `steamcmd`, `xz`, `zstd`, and `python3` to be available.
+Local runs expect `steamcmd` (Steam mode only), `xz`, `zstd`, and `python3` to
+be available.
 
 ## Integration Testing
 
